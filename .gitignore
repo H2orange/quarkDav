@@ -1,0 +1,29 @@
+node_modules/
+dist/
+build/
+
+# 运行时状态：夸克登录态（accessToken / refreshToken）、管理员口令哈希、
+# 挂载密钥 —— 全部是敏感数据，绝不入库
+data/
+
+# 托管平台的部署标记文件
+*.genie
+
+# 工作区元数据（含部署配置与开发日志，属本地信息）
+.workbuddy/
+
+# 临时/调试产物
+*.log
+_*.txt
+test_*.mjs
+chk*.mjs
+probe*.mjs
+verify*.mjs
+mode*.mjs
+diag*.mjs
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

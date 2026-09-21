@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>myDav · 夸克网盘 WebDAV</title>
+  <style>
+    :root { --bg:#f5f8ff; --card:#fff; --primary:#3b82f6; --text:#1f2937; --muted:#6b7280; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+      background:linear-gradient(160deg,#eef4ff,#f7faff); color:var(--text); min-height:100vh; padding:24px; }
+    .wrap { max-width:760px; margin:0 auto; }
+    .card { background:var(--card); border-radius:18px; padding:28px; box-shadow:0 10px 40px rgba(59,130,246,.12); }
+    h1 { font-size:20px; margin:0 0 4px; }
+    .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+    .center { text-align:center; }
+    .qr { width:220px; height:220px; margin:0 auto 16px; border-radius:12px; background:#f1f5f9;
+      display:flex; align-items:center; justify-content:center; overflow:hidden; }
+    .qr img { width:100%; height:100%; object-fit:contain; }
+    .qr .ph { color:var(--muted); font-size:13px; }
+    .status { font-size:14px; margin-bottom:16px; min-height:20px; }
+    .ok { color:#16a34a; } .wait { color:var(--muted); }
+    button { padding:10px 16px; border:none; border-radius:10px; background:var(--primary);
+      color:#fff; font-size:14px; cursor:pointer; transition:.15s; }
+    button:hover { background:#2563eb; }
+    button.ghost { background:#eef2ff; color:var(--primary); }
+    button.danger { background:#fee2e2; color:#dc2626; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    input { width:100%; padding:11px 14px; border:1px solid #dbe4f5; border-radius:10px;
+      font-size:14px; outline:none; transition:.15s; }
+    input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(59,130,246,.12); }
+    .field { margin-bottom:12px; }
+    .hint { font-size:12px; color:var(--muted); margin-top:16px; line-height:1.7; }
+    code { background:#eef2ff; padding:1px 6px; border-radius:6px; font-size:12px; word-break:break-all; }
+    .box { background:#f8fafc; border:1px solid #e8eefc; border-radius:12px; padding:14px; margin:14px 0; font-size:13px; line-height:1.7; }
+    .box b { color:var(--primary); }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .breadcrumb { font-size:13px; color:var(--muted); margin-bottom:10px; }
+    .breadcrumb a { color:var(--primary); cursor:pointer; text-decoration:none; }
+    .files { list-style:none; margin:0; padding:0; }
+    .files li { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px; }
+    .files li:hover { background:#f1f5f9; }
+    .files .ico { width:22px; text-align:center; }
+    .files .name { flex:1; cursor:pointer; word-break:break-all; }
+    .files .name.folder { color:var(--primary); font-weight:600; }
+    .files .meta { color:var(--muted); font-size:12px; }
+    .files a.open { color:var(--primary); font-size:12px; text-decoration:none; }
+    .err { color:#dc2626; font-size:13px; margin-bottom:10px; min-height:18px; }
+    .tip { color:var(--muted); font-size:12px; }
+    .tip.done { color:#16a34a; }
+    [hidden] { display:none !important; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- 管理员验证视图 -->
+    <div class="card" id="adminView">
+      <h1>🔒 myDav 管理台</h1>
+      <div class="sub" id="adminSub">请输入管理员密码</div>
+      <div class="err" id="adminErr"></div>
+      <div class="field"><input type="password" id="adminPw" placeholder="管理员密码" autocomplete="current-password" /></div>
+      <div class="field" id="adminPw2Wrap" hidden>
+        <input type="password" id="adminPw2" placeholder="再输入一次" autocomplete="new-password" />
+      </div>
+      <div class="row"><button id="adminBtn">进入</button></div>
+      <div class="hint" id="adminHint">
+        密码用于保护本管理台、所有接口与 WebDAV 挂载地址。<br/>
+        忘记密码只能重设：删除服务端 <code>data/admin.json</code> 后重新设置。
+      </div>
+    </div>
+
+    <!-- 夸克扫码登录视图 -->
+    <div class="card" id="loginView" hidden>
+      <h1>myDav</h1>
+      <div class="sub">夸克网盘 → WebDAV 桥接 · 用夸克 App 扫码登录</div>
+      <div class="center">
+        <div class="qr" id="qr"><div class="ph">点击下方按钮获取二维码</div></div>
+        <div class="status wait" id="status">未登录</div>
+        <button id="start">获取登录二维码</button>
+      </div>
+    </div>
+
+    <!-- 仪表盘视图 -->
+    <div class="card" id="dashView" hidden>
+      <div class="row" style="justify-content:space-between;">
+        <div><h1>✅ 已登录</h1><div class="sub">夸克网盘文件 · 可直接在网页浏览</div></div>
+        <button class="ghost" id="logout">退出夸克登录</button>
+      </div>
+
+      <div class="box">
+        <div style="margin-bottom:6px;"><b>挂载信息</b></div>
+        主机：<code id="host"></code><br/>
+        路径：<code id="davPath"></code><br/>
+        账号：<code>admin</code> · 密码：<code>admin</code>（线上由路径里的密钥鉴权，此两栏任意填）<br/>
+        <div class="row" style="margin-top:10px;">
+          <button id="copyMount">一键复制挂载信息</button>
+          <span class="tip" id="copyTip">复制后直接粘贴到播放器</span>
+        </div>
+      </div>
+
+      <div class="box">
+        <div style="margin-bottom:6px;"><b>挂载密钥</b>（路径里的 <code>/dav/<span id="curSecret"></span></code>）</div>
+        <div class="row">
+          <input id="secretInput" style="flex:1;min-width:180px;" placeholder="输入自定义密钥（至少 6 位，勿含空格或斜杠）" />
+          <button id="saveSecret">保存</button>
+          <button class="ghost" id="randSecret">随机生成</button>
+        </div>
+        <div class="hint" style="margin-top:8px;">
+          改密钥后旧挂载地址立即失效，播放器需用新地址重新添加。建议用你自己的易记口令。
+        </div>
+      </div>
+
+      <div class="breadcrumb" id="crumb"></div>
+      <ul class="files" id="files"></ul>
+      <div class="err" id="ferr"></div>
+    </div>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById('start');
+    const statusEl = document.getElementById('status');
+    const qrEl = document.getElementById('qr');
+    const adminView = document.getElementById('adminView');
+    const loginView = document.getElementById('loginView');
+    const dashView = document.getElementById('dashView');
+    let timer = null, qt = null, davToken = '', curPath = '/', isSetup = false;
+
+    let adminToken = localStorage.getItem('myDavAdmin') || '';
+
+    const esc = (s) => String(s).replace(/[&<>"']/g,
+      (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const enc = (s) => encodeURIComponent(s);
+
+    // Every authenticated call carries the admin session in a custom header —
+    // the hosting proxy strips Authorization, but custom headers pass through.
+    async function api(u, o = {}) {
+      const headers = Object.assign({}, o.headers || {});
+      if (adminToken) headers['X-Admin-Token'] = adminToken;
+      const r = await fetch(u, Object.assign({}, o, { headers }));
+      const d = await r.json().catch(() => ({}));
+      if (d.needAdmin) { adminToken = ''; localStorage.removeItem('myDavAdmin'); showAdmin(); throw new Error('会话已过期'); }
+      return d;
+    }
+
+    function showAdmin() {
+      adminView.hidden = false; loginView.hidden = true; dashView.hidden = true;
+    }
+    function setAdminToken(t) {
+      adminToken = t;
+      localStorage.setItem('myDavAdmin', t);
+    }
+
+    async function submitAdmin() {
+      const pw = document.getElementById('adminPw').value;
+      const errEl = document.getElementById('adminErr');
+      errEl.textContent = '';
+      if (!pw) { errEl.textContent = '请输入密码'; return; }
+      if (isSetup) {
+        const pw2 = document.getElementById('adminPw2').value;
+        if (pw !== pw2) { errEl.textContent = '两次输入的密码不一致'; return; }
+        if (pw.length < 8) { errEl.textContent = '密码至少 8 位'; return; }
+        const d = await fetch('/api/admin/setup', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw }),
+        }).then((r) => r.json());
+        if (d.error) { errEl.textContent = d.error; return; }
+        setAdminToken(d.token);
+      } else {
+        const d = await fetch('/api/admin/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw }),
+        }).then((r) => r.json());
+        if (d.error) { errEl.textContent = d.error; return; }
+        setAdminToken(d.token);
+      }
+      document.getElementById('adminPw').value = '';
+      document.getElementById('adminPw2').value = '';
+      await enterApp();
+    }
+
+    async function enterApp() {
+      adminView.hidden = true;
+      let s;
+      try { s = await api('/api/status'); } catch { return; }
+      davToken = s.webdavToken || davToken;
+      if (s.loggedIn) { await showDashboard(); return; }
+      // Not logged in on this worker (e.g. right after a redeploy).
+      const b = localStorage.getItem('myDavBackup');
+      if (b) {
+        try {
+          const r = await api('/api/restore', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b,
+          });
+          if (r.loggedIn) { await showDashboard(); return; }
+        } catch {}
+      }
+      loginView.hidden = false;
+    }
+
+    function davUrl(path) {
+      const segs = path.split('/').filter(Boolean).map(enc).join('/');
+      return location.origin + '/dav/' + davToken + (segs ? '/' + segs : '');
+    }
+
+    async function showDashboard() {
+      loginView.hidden = true;
+      dashView.hidden = false;
+      document.getElementById('host').textContent = location.host;
+      document.getElementById('davPath').textContent = '/dav/' + davToken;
+      document.getElementById('curSecret').textContent = davToken;
+      document.getElementById('secretInput').value = '';
+      document.getElementById('copyMount').onclick = copyMountInfo;
+      await loadFiles(curPath || '/');
+    }
+
+    // Plain-text mount info, ready to paste into any WebDAV client.
+    function mountInfoText() {
+      return [
+        '地址：' + location.origin + '/dav/' + davToken,
+        '主机：' + location.host,
+        '路径：/dav/' + davToken,
+        '端口：443',
+        '协议：https',
+        '账号：admin',
+        '密码：admin',
+      ].join('\n');
+    }
+
+    async function copyMountInfo() {
+      const text = mountInfoText();
+      const tip = document.getElementById('copyTip');
+      let done = false;
+      // navigator.clipboard needs a secure context and permission; fall back to
+      // a temporary textarea for http:// or older browsers.
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          done = true;
+        }
+      } catch {}
+      if (!done) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          done = document.execCommand('copy');
+          document.body.removeChild(ta);
+        } catch {}
+      }
+      if (done) {
+        tip.textContent = '✅ 已复制到剪贴板';
+        tip.className = 'tip done';
+        setTimeout(() => { tip.textContent = '复制后直接粘贴到播放器'; tip.className = 'tip'; }, 2200);
+      } else {
+        // Last resort: show it so it can be selected manually.
+        window.prompt('自动复制失败，请手动复制：', text);
+      }
+    }
+
+    async function loadFiles(path) {
+      curPath = path;
+      document.getElementById('ferr').textContent = '';
+      const crumb = document.getElementById('crumb');
+      crumb.innerHTML = '';
+      const parts = path.split('/').filter(Boolean);
+      let acc = '';
+      const addCrumb = (label, p) => {
+        const a = document.createElement('a');
+        a.textContent = label;              // textContent: filenames are untrusted
+        a.onclick = () => loadFiles(p);
+        crumb.appendChild(a);
+        crumb.appendChild(document.createTextNode(' / '));
+      };
+      addCrumb('根目录', '/');
+      for (const p of parts) { acc += '/' + p; addCrumb(p, acc); }
+
+      try {
+        const d = await api('/api/files?path=' + enc(path));
+        if (d.error) { document.getElementById('ferr').textContent = '⚠️ ' + d.error; return; }
+        const ul = document.getElementById('files');
+        ul.innerHTML = '';
+        const dirs = d.items.filter((i) => i.isdir).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+        const files = d.items.filter((i) => !i.isdir).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+        const fmt = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : (n / 1024).toFixed(0) + 'KB');
+        for (const it of [...dirs, ...files]) {
+          const li = document.createElement('li');
+          const full = (path === '/' ? '' : path) + '/' + it.name;
+          const ico = document.createElement('span');
+          ico.className = 'ico'; ico.textContent = it.isdir ? '📁' : '🎬';
+          const nm = document.createElement('span');
+          nm.className = 'name' + (it.isdir ? ' folder' : '');
+          nm.textContent = it.name;         // never innerHTML for untrusted names
+          if (it.isdir) nm.onclick = () => loadFiles(full);
+          li.appendChild(ico); li.appendChild(nm);
+          if (!it.isdir) {
+            const meta = document.createElement('span');
+            meta.className = 'meta'; meta.textContent = fmt(it.size || 0);
+            const open = document.createElement('a');
+            open.className = 'open'; open.href = davUrl(full);
+            open.target = '_blank'; open.textContent = '打开/播放';
+            li.appendChild(meta); li.appendChild(open);
+          }
+          ul.appendChild(li);
+        }
+      } catch (e) {
+        document.getElementById('ferr').textContent = '⚠️ 加载失败：' + e.message;
+      }
+    }
+
+    async function startLogin() {
+      startBtn.disabled = true;
+      statusEl.textContent = '正在生成二维码…'; statusEl.className = 'status wait';
+      try {
+        const d = await api('/api/login/start', { method: 'POST' });
+        if (!d.qr) throw new Error('服务端未返回二维码');
+        qrEl.innerHTML = `<img src="${esc(d.qr)}" alt="qr" />`;
+        qt = d.queryToken || null;
+        statusEl.textContent = '请用夸克 App 扫码并在手机上确认…';
+        poll();
+      } catch (e) {
+        startBtn.disabled = false;
+        statusEl.textContent = '⚠️ 获取失败：' + e.message;
+      }
+    }
+
+    function poll() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(async () => {
+        try {
+          const d = await api('/api/login/status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ queryToken: qt }),
+          });
+          if (d.loggedIn) {
+            clearInterval(timer);
+            try {
+              const s = await api('/api/status');
+              davToken = s.webdavToken || davToken;
+            } catch {}
+            await showDashboard();
+            await backupToLocal();
+            return;
+          }
+          if (d.error) {
+            const pending = /未确认|未扫码|等待|wait|pending|scan|无效|过期/i.test(d.error);
+            statusEl.textContent = pending ? '等待夸克 App 扫码并在手机上确认…'
+              : '⚠️ 登录异常：' + d.error + '（可刷新页面重试）';
+            statusEl.className = 'status wait';
+          }
+        } catch (e) {
+          statusEl.textContent = '检测登录中…（' + e.message + '）';
+        }
+      }, 2000);
+    }
+
+    async function backupToLocal() {
+      try {
+        const st = await api('/api/backup');
+        if (st && st.accessToken) localStorage.setItem('myDavBackup', JSON.stringify(st));
+      } catch {}
+    }
+
+    // Change the mount secret: body.secret = typed value, or empty for random.
+    async function changeSecret(secret) {
+      const d = await api('/api/webdav/rotate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: secret || '' }),
+      });
+      if (d.error) throw new Error(d.error);
+      davToken = String(d.mountBase || '').replace('/dav/', '') || davToken;
+      await showDashboard();
+      if (d.unchanged) alert('密钥未变化（与当前相同）。');
+      else alert('✅ 密钥已更新为：' + davToken + '\n请用新地址重新添加播放器。');
+    }
+
+    async function saveSecret() {
+      const v = document.getElementById('secretInput').value.trim();
+      if (!v) { alert('请输入密钥，或点「随机生成」。'); return; }
+      if (v.length < 6) { alert('密钥至少 6 位。'); return; }
+      if (/[/\\?#\s]/.test(v)) { alert('密钥不能包含空格、斜杠或 ? # 字符。'); return; }
+      if (v === davToken) { alert('新密钥与当前密钥相同，无需修改。'); return; }
+      if (!confirm('将挂载密钥改为「' + v + '」？\n旧地址会立即失效，播放器需重新添加。')) return;
+      try { await changeSecret(v); } catch (e) { alert('修改失败：' + e.message); }
+    }
+
+    async function randomSecret() {
+      if (!confirm('随机生成新密钥？旧地址会立即失效，播放器需重新添加。')) return;
+      try { await changeSecret(''); } catch (e) { alert('生成失败：' + e.message); }
+    }
+
+    async function logout() {
+      if (timer) clearInterval(timer);
+      localStorage.removeItem('myDavBackup');
+      try { await api('/api/logout', { method: 'POST' }); } catch {}
+      location.reload();
+    }
+
+    document.getElementById('adminBtn').onclick = submitAdmin;
+    document.getElementById('adminPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAdmin(); });
+    document.getElementById('adminPw2').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAdmin(); });
+    startBtn.onclick = startLogin;
+    document.getElementById('logout').onclick = logout;
+    document.getElementById('saveSecret').onclick = saveSecret;
+    document.getElementById('randSecret').onclick = randomSecret;
+    document.getElementById('secretInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveSecret(); });
+
+    (async () => {
+      // First find out whether an admin password exists yet.
+      const st = await fetch('/api/admin/state').then((r) => r.json()).catch(() => ({}));
+      isSetup = !st.initialized;
+      if (isSetup) {
+        document.getElementById('adminSub').textContent = '首次使用：请设置管理员密码（至少 8 位）';
+        document.getElementById('adminPw').placeholder = '设置管理员密码';
+        document.getElementById('adminPw2Wrap').hidden = false;
+        document.getElementById('adminBtn').textContent = '设置密码并进入';
+      }
+      showAdmin();
+      if (!isSetup && adminToken) {
+        // We have a saved session — try to use it silently.
+        try { await enterApp(); } catch {}
+      }
+    })();
+  </script>
+</body>
+</html>

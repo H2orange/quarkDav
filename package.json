@@ -1,0 +1,13 @@
+{
+  "name": "mydav",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quark netdisk (TV API) -> WebDAV bridge, deployable as a hosted service",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
