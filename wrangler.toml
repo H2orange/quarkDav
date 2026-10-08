@@ -1,0 +1,35 @@
+# myDav on Cloudflare Workers
+#
+# Storage moves from ./data/* to Workers KV (binding MYDAV_KV), and
+# public/login.html is compiled into src/consoleHtml.mjs so the bundle never
+# needs the filesystem.
+#
+# First-time setup (run locally, needs `npx wrangler login` once):
+#   npx wrangler kv namespace create MYDAV_KV
+# then paste the printed id into the [[kv_namespaces]] block below.
+
+name = "mydav"
+main = "src/worker.mjs"
+compatibility_date = "2026-10-08"
+
+[[kv_namespaces]]
+binding = "MYDAV_KV"
+id = "REPLACE_WITH_YOUR_KV_ID"
+preview_id = "REPLACE_WITH_YOUR_KV_ID"
+
+[vars]
+# 302 to the Quark CDN. "proxy" would stream every byte through the edge and
+# risks being cut off mid-playback — see the note in src/webdav.mjs.
+DAV_MODE = "redirect"
+# Free plan gives ~10ms CPU per request. Web Crypto PBKDF2 at 120k iterations
+# would blow that; 20k still costs an attacker plenty and fits the budget.
+PBKDF2_ITERATIONS = "20000"
+SESSION_HOURS = "12"
+# Free plan hard-caps 50 subrequests per request. Each path level costs one
+# Quark list call, and getLink costs another, so stay well under.
+MAX_SUBREQUESTS = "24"
+WEBDAV_USER = "admin"
+WEBDAV_PASS = "admin"
+
+[observability]
+enabled = true

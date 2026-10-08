@@ -1,6 +1,9 @@
 // QuarkTV driver — ported 1:1 from Alist's drivers/quark_uc_tv (Quark netdisk variant).
 // Uses the TV-end API which is the only path that currently returns playable video streams.
-import crypto from 'crypto';
+// MD5/SHA-256 come from our runtime-neutral module: Workers has no MD5 in Web
+// Crypto, and relying on node:crypto would lock us out of Cloudflare. See
+// src/cryptoX.mjs.
+import { md5Hex, sha256Hex, randomHex } from './cryptoX.mjs';
 
 // --- Constants copied from Alist quark_uc_tv/meta.go (Quark variant) ---
 const CONF = {
@@ -25,12 +28,10 @@ const DEVICE = {
     'Mozilla/5.0 (Linux; U; Android 13; zh-cn; M2004J7AC Build/UKQ1.231108.001) AppleWebKit/533.1 (KHTML, like Gecko) Mobile Safari/533.1',
 };
 
-const md5hex = (s) => crypto.createHash('md5').update(s).digest('hex');
-const sha256hex = (s) => crypto.createHash('sha256').update(s).digest('hex');
-
 export class QuarkTV {
   constructor(state = {}) {
-    this.deviceID = state.deviceID || md5hex(String(Date.now()));
+    // A stable random device id: no MD5 needed here, and any 32-hex id works.
+    this.deviceID = state.deviceID || randomHex(16);
     this.accessToken = state.accessToken || '';
     this.refreshToken = state.refreshToken || '';
     this.queryToken = state.queryToken || '';
@@ -46,10 +47,10 @@ export class QuarkTV {
   }
 
   // method + "&" + pathname + "&" + timestamp + "&" + signKey  -> sha256 hex
-  _sign(method, pathname) {
+  async _sign(method, pathname) {
     const ts = String(Date.now());
-    const reqID = md5hex(this.deviceID + ts);
-    const token = sha256hex(`${method}&${pathname}&${ts}&${CONF.signKey}`);
+    const reqID = md5Hex(this.deviceID + ts);
+    const token = await sha256Hex(`${method}&${pathname}&${ts}&${CONF.signKey}`);
     return { ts, reqID, token };
   }
 
@@ -73,7 +74,7 @@ export class QuarkTV {
   }
 
   async _request(method, pathname, params = {}, isRetry = false) {
-    const { ts, reqID, token } = this._sign(method, pathname);
+    const { ts, reqID, token } = await this._sign(method, pathname);
     const url = new URL(CONF.api + pathname);
     const q = this._commonQuery(params);
     q.req_id = reqID;
@@ -105,8 +106,8 @@ export class QuarkTV {
     return json;
   }
 
-  _tokenBody(extra) {
-    const { reqID } = this._sign('POST', '/token');
+  async _tokenBody(extra) {
+    const { reqID } = await this._sign('POST', '/token');
     return {
       req_id: reqID,
       app_ver: CONF.appVer,
@@ -127,7 +128,7 @@ export class QuarkTV {
   async _exchangeToken(rawBody) {
     // extscreen requires the full device-field body; callers pass only the
     // auth payload ({code} / {refresh_token}) — merge the common fields here.
-    const body = this._tokenBody(rawBody);
+    const body = await this._tokenBody(rawBody);
     const res = await fetch(CONF.codeApi + '/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': DEVICE.userAgent },

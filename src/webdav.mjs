@@ -1,19 +1,20 @@
-// Minimal read-only WebDAV server (OPTIONS / PROPFIND / GET / HEAD).
-// File GET/HEAD: in "proxy" mode (default) we fetch Quark's CDN url and stream
-// the bytes back to the client (200/206) so media scanners (网易爆米花/Filmly/
-// 飞牛) that probe file content can detect playable media. "redirect" mode
-// returns a 302 straight to the CDN (saves our bandwidth, but scanners that
-// don't follow redirects will report "no data").
-import { Readable } from 'stream';
-
-// "redirect" (default): 302 straight to Quark's CDN — the client pulls the
-// bytes itself, so our server pays only for API calls, not video bandwidth.
-// "proxy": stream through our server (200/206). Costs inbound+outbound
-// bandwidth (~file size per view) but works with clients that refuse to
-// follow redirects. Override with the DAV_MODE env var.
-const DAV_MODE = process.env.DAV_MODE || 'redirect';
+// Minimal read-only WebDAV (OPTIONS / PROPFIND / GET / HEAD) built on Web
+// standard Request/Response, so it runs identically on Node 22 and Cloudflare
+// Workers.
+//
+// IMPORTANT: this module must not touch anything Node-specific — Worker bundles
+// would fail at deploy time.
+//
+// Two serving modes (DIC_MODE in the old Node build, "mode" here):
+//   redirect: 302 straight to Quark's CDN. The client pulls the bytes itself,
+//             so we pay only for API calls. This is the ONLY sensible mode on
+//             Cloudflare: proxying a 2-hour movie would hold one edge request
+//             open for the whole playback.
+//   proxy:    stream through us (200/206). Needed only for clients that refuse
+//             to follow redirects; on Workers it risks being cut off mid-play.
 const cache = new Map(); // fid -> { ts, files[] }
 const CACHE_TTL = 30_000;
+const CACHE_MAX = 200; // Worker isolate memory is capped at 128MB — keep it bounded.
 
 function cacheGet(fid) {
   const e = cache.get(fid);
@@ -21,19 +22,42 @@ function cacheGet(fid) {
   return null;
 }
 function cacheSet(fid, files) {
+  if (cache.size >= CACHE_MAX) {
+    let n = 0;
+    for (const k of cache.keys()) {
+      cache.delete(k);
+      if (++n >= CACHE_MAX / 2) break;
+    }
+  }
   cache.set(fid, { ts: Date.now(), files });
 }
 
+// A per-request quota for outbound Quark API calls. Cloudflare's Free plan
+// caps a request at 50 subrequests, so a naive Depth: infinity walk over a big
+// drive (one list call per folder) would be killed mid-response. We spend the
+// budget deliberately and stop walking once it runs out.
+function makeBudget(max) {
+  let remaining = Number.isFinite(max) && max > 0 ? max : Infinity;
+  return {
+    get left() { return remaining; },
+    async list(quark, fid) {
+      if (remaining <= 0) return [];
+      remaining -= 1;
+      const hit = cacheGet(fid);
+      if (hit) return hit;
+      const files = await quark.list(fid);
+      cacheSet(fid, files);
+      return files;
+    },
+  };
+}
+
 // Walk path segments from root (fid "0") to resolve a DAV path to a Quark file.
-async function resolvePath(quark, path) {
+async function resolvePath(quark, path, budget) {
   const segs = path.split('/').filter(Boolean);
   let cur = { fid: '0', isdir: 1, filename: '', size: 0, updated_at: 0, created_at: 0 };
   for (const seg of segs) {
-    let files = cacheGet(cur.fid);
-    if (!files) {
-      files = await quark.list(cur.fid);
-      cacheSet(cur.fid, files);
-    }
+    const files = await budget.list(quark, cur.fid);
     const found = files.find((f) => f.filename === seg);
     if (!found) throw Object.assign(new Error('not found'), { status: 404 });
     cur = found;
@@ -55,7 +79,7 @@ const MIME = {
   mp4: 'video/mp4', mkv: 'video/x-matroska', avi: 'video/x-msvideo',
   mov: 'video/quicktime', wmv: 'video/x-ms-wmv', flv: 'video/x-flv',
   webm: 'video/webm', m4v: 'video/x-m4v', ts: 'video/mp2t', mpg: 'video/mpeg',
-  mpeg: 'video/mpeg', rmvb: 'application/vnd.rn-realmedia-vbr', rm: 'application/vnd.rn-realmedia',
+  mpeg: 'video/mpeg', rmvb: 'application/vnd.rn-realmedia-vbr', rm: 'application/vnd.rn-realmedia-vbr',
   iso: 'application/x-iso9660-image',
   mp3: 'audio/mpeg', flac: 'audio/flac', wav: 'audio/wav', aac: 'audio/aac',
   m4a: 'audio/mp4', ogg: 'audio/ogg',
@@ -101,25 +125,31 @@ function propstat(item, href) {
 }
 
 // Recursively collect descendants (for Depth: infinity).
-async function collectDeep(quark, parentFid, parentPath, depth, out, limit) {
-  if (depth < 0 || out.length >= limit) return;
-  let files = cacheGet(parentFid);
-  if (!files) {
-    files = await quark.list(parentFid);
-    cacheSet(parentFid, files);
-  }
+async function collectDeep(quark, parentFid, parentPath, depth, out, limit, budget) {
+  if (depth < 0 || out.length >= limit || budget.left <= 0) return;
+  const files = await budget.list(quark, parentFid);
   for (const f of files) {
-    if (out.length >= limit) return;
+    if (out.length >= limit || budget.left <= 0) return;
     const cp = parentPath === '/' ? '/' + f.filename : parentPath + '/' + f.filename;
     out.push([f, cp]);
     if (f.isdir === 1) {
-      await collectDeep(quark, f.fid, cp, depth - 1, out, limit);
+      await collectDeep(quark, f.fid, cp, depth - 1, out, limit, budget);
     }
   }
 }
 
-export async function handleDav(req, res, quark, { base = '/dav' }) {
-  const url = new URL(req.url, 'http://localhost');
+const text = (status, msg, headers = {}) =>
+  new Response(msg, {
+    status,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', ...headers },
+  });
+
+export async function handleDav(request, quark, {
+  base = '/dav',
+  mode = 'redirect',
+  maxSubrequests = Infinity,
+} = {}) {
+  const url = new URL(request.url);
   let p;
   try {
     p = decodeURIComponent(url.pathname);
@@ -148,32 +178,32 @@ export async function handleDav(req, res, quark, { base = '/dav' }) {
     return full + tail;
   };
 
+  const budget = makeBudget(maxSubrequests);
+
   try {
-    if (req.method === 'OPTIONS') {
-      res.writeHead(200, {
-        DAV: '1,2',
-        Allow: 'OPTIONS, GET, HEAD, PROPFIND',
-        'MS-Author-Via': 'DAV',
-        'Content-Length': '0',
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          DAV: '1,2',
+          Allow: 'OPTIONS, GET, HEAD, PROPFIND',
+          'MS-Author-Via': 'DAV',
+          'Content-Length': '0',
+        },
       });
-      return res.end();
     }
 
-    if (req.method === 'PROPFIND') {
-      const item = await resolvePath(quark, p);
+    if (request.method === 'PROPFIND') {
+      const item = await resolvePath(quark, p, budget);
       const entries = [[item, p]];
       if (item.isdir === 1) {
-        const depthHeader = String(req.headers['depth'] ?? '1').toLowerCase();
+        const depthHeader = String(request.headers.get('depth') ?? '1').toLowerCase();
         if (depthHeader === 'infinity') {
-          // Scanner asked for everything at once — recurse (capped so we
-          // don't stall on huge drives).
-          await collectDeep(quark, item.fid, p, 3, entries, 1200);
+          // Scanner asked for everything at once — recurse, but bounded by both
+          // a node cap and the subrequest budget (50 on Cloudflare Free).
+          await collectDeep(quark, item.fid, p, 3, entries, 1200, budget);
         } else if (depthHeader !== '0') {
-          let files = cacheGet(item.fid);
-          if (!files) {
-            files = await quark.list(item.fid);
-            cacheSet(item.fid, files);
-          }
+          const files = await budget.list(quark, item.fid);
           for (const f of files) {
             const childPath = p === '/' ? '/' + f.filename : p + '/' + f.filename;
             entries.push([f, childPath]);
@@ -185,68 +215,48 @@ export async function handleDav(req, res, quark, { base = '/dav' }) {
         '<D:multistatus xmlns:D="DAV:">\n' +
         entries.map(([it, rel]) => propstat(it, hrefFor(it, rel))).join('\n') +
         '\n</D:multistatus>';
-      res.writeHead(207, {
-        'Content-Type': 'application/xml; charset=utf-8',
-        DAV: '1,2',
+      return new Response(xml, {
+        status: 207,
+        headers: { 'Content-Type': 'application/xml; charset=utf-8', DAV: '1,2' },
       });
-      return res.end(xml);
     }
 
-    if (req.method === 'GET' || req.method === 'HEAD') {
-      const item = await resolvePath(quark, p);
-      if (item.isdir === 1) {
-        res.writeHead(405, { 'Content-Length': '0' });
-        return res.end();
-      }
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      const item = await resolvePath(quark, p, budget);
+      if (item.isdir === 1) return text(405, 'Directory', { 'Content-Length': '0' });
       const link = await quark.getLink(item.fid);
       if (!link) throw Object.assign(new Error('no link'), { status: 404 });
 
-      if (DAV_MODE === 'redirect') {
-        res.writeHead(302, { Location: link, 'Content-Length': '0' });
-        return res.end();
+      if (mode !== 'proxy') {
+        return new Response(null, { status: 302, headers: { Location: link } });
       }
 
       // Proxy mode: fetch Quark's CDN and stream back, honoring Range for seeking.
-      const upHeaders = {};
-      const range = req.headers['range'];
-      if (range) upHeaders['Range'] = range;
+      const up = {};
+      const range = request.headers.get('range');
+      if (range) up.Range = range;
       let upstream;
       try {
-        upstream = await fetch(link, { method: 'GET', headers: upHeaders, redirect: 'follow' });
+        upstream = await fetch(link, { method: 'GET', headers: up, redirect: 'follow' });
       } catch (e) {
         throw Object.assign(new Error('upstream fetch failed: ' + e.message), { status: 502 });
       }
-      const out = {};
-      const ct = upstream.headers.get('content-type');
-      if (ct) out['Content-Type'] = ct;
-      const cl = upstream.headers.get('content-length');
-      if (cl) out['Content-Length'] = cl;
-      const cr = upstream.headers.get('content-range');
-      if (cr) out['Content-Range'] = cr;
-      out['Accept-Ranges'] = upstream.headers.get('accept-ranges') || 'bytes';
-      const etag = upstream.headers.get('etag');
-      if (etag) out['ETag'] = etag;
-      const lm = upstream.headers.get('last-modified');
-      if (lm) out['Last-Modified'] = lm;
-      res.writeHead(upstream.status, out);
-
-      // HEAD: headers only, drop the body to save bandwidth.
-      if (req.method === 'HEAD' || !upstream.body) {
-        try { upstream.body?.cancel?.(); } catch {}
-        return res.end();
+      const out = new Headers();
+      for (const h of ['content-type', 'content-length', 'content-range', 'etag', 'last-modified']) {
+        const v = upstream.headers.get(h);
+        if (v) out.set(h, v);
       }
-      const nodeStream = Readable.fromWeb(upstream.body);
-      nodeStream.on('error', () => { try { res.destroy(); } catch {} });
-      req.on('close', () => { try { nodeStream.destroy(); } catch {} });
-      nodeStream.pipe(res);
-      return;
+      out.set('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
+
+      if (request.method === 'HEAD' || !upstream.body) {
+        if (upstream.body) { try { await upstream.body.cancel(); } catch {} }
+        return new Response(null, { status: upstream.status, headers: out });
+      }
+      return new Response(upstream.body, { status: upstream.status, headers: out });
     }
 
-    res.writeHead(405, { 'Content-Length': '0' });
-    res.end();
+    return text(405, 'Method not allowed', { 'Content-Length': '0' });
   } catch (e) {
-    const st = e.status || 500;
-    res.writeHead(st, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(e.message || 'error');
+    return text(e.status || 500, e.message || 'error');
   }
 }

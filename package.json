@@ -5,9 +5,15 @@
   "type": "module",
   "description": "Quark netdisk (TV API) -> WebDAV bridge, deployable as a hosted service",
   "scripts": {
-    "start": "node src/server.mjs"
+    "start": "node src/server.mjs",
+    "build:html": "node scripts/build-html.mjs",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "wrangler": "^4.148.0"
   }
 }

@@ -13,6 +13,7 @@ data/
 .workbuddy/
 
 # 临时/调试产物
+.wrangler/
 *.log
 _*.txt
 test_*.mjs
