@@ -4,7 +4,7 @@
 
 基于夸克 **TV 端 API**（QuarkTV，走 OAuth 扫码登录），纯 Node.js 实现，零第三方依赖。
 
-同一份业务代码有两种跑法：本机 / VPS / 托管平台上的 **Node 服务**，或跑在 **Cloudflare Workers** 上的无服务器版本（见 [部署到 Cloudflare Workers](#部署到-cloudflare-workers无服务器版)）。两者共用同一份核心逻辑。
+两种部署方式：[WorkBuddy 托管](#方式一workbuddy-托管推荐)（Node 服务，**国内推荐**）或 [Cloudflare Workers](#方式二cloudflare-workers)（异地备用）。两者共用同一份核心逻辑。
 
 > 移植自 [Alist](https://github.com/AlistGo/alist) 的 `quark_uc_tv` 驱动，签名算法、端点、请求头与其保持一致。
 
@@ -55,78 +55,74 @@ npm start
 | `WEBDAV_PASS` | `admin` | Basic 认证密码（回退用） |
 | `SESSION_HOURS` | `12` | 管理台会话有效期（小时） |
 
-## 部署到 Cloudflare Workers（无服务器版）
+## 部署
 
-同一份核心逻辑 `src/app.mjs` 配两个入口，修 bug 只需改一处：
+两种方式共用一份核心逻辑 `src/app.mjs`，只是入口不同：
 
-| 入口 | 运行环境 | 状态存放位置 |
+| | **WorkBuddy 托管**（Node） | **Cloudflare Workers** |
 |---|---|---|
-| `src/server.mjs` | Node 22（本机 / VPS / 托管平台）| `data/` 下的文件 |
-| `src/worker.mjs` | Cloudflare Workers（全球边缘）| Workers KV |
+| 入口 | `src/server.mjs` | `src/worker.mjs` |
+| 状态存放 | `data/` 下的文件 | Workers KV |
+| 视频路径 | `redirect` 302 直连 CDN（也可切 `proxy` 中转） | 固定 302 |
+| 国内播放 | 流畅 | **实测明显卡顿** |
+| 适合 | 日常主力 | 异地 / 境外备用 |
 
-### 用 GitHub Actions 部署（推荐，不需要碰命令行）
+> **选哪个：** 国内直接用 WorkBuddy 托管。CF 版链路要绕境外边缘节点（且自定义域名必须橙色云代理），
+> 播放卡顿很明显 —— 当备份地址或人在境外时更合适。
 
-仓库自带 `.github/workflows/deploy-cloudflare.yml`，**KV 命名空间由 workflow 自动创建**（按标题
-`MYDAV_KV` 查找，找不到就调用 API 新建），所以你只需要准备 Cloudflare 侧的两个值。
+### 方式一：WorkBuddy 托管（推荐）
+
+在 WorkBuddy 里打开本项目，说一句「部署」即可 —— 平台会执行 `npm start`（`node src/server.mjs`），
+并生成一个 `https://<应用名>.app.workbuddy.host` 的地址。以后更新代码再说一次「部署」就会原地更新同一个应用。
+
+服务端不需要任何改动：代码已监听 `process.env.PORT` 并绑定 `0.0.0.0`。
+
+部署后：打开地址 → 设置管理员密码 → 扫码登录夸克 → 「一键复制挂载信息」→ 填进播放器。
+
+> `data/token.json`（夸克登录态）会随部署包一起上传，所以**重新部署后不用重新扫码**。
+> 它被 `.gitignore` 排除，不会进 GitHub。
+
+### 方式二：Cloudflare Workers
+
+用 GitHub Actions 部署，**KV 命名空间由 workflow 自动创建**，你只需准备 Cloudflare 侧的两个值。
 
 **① 拿两个值**
 
-- **API Token** — https://dash.cloudflare.com/profile/api-tokens → Create Custom Token，逐条勾选：
-
-  | 范围 | 资源 | 权限 |
-  |---|---|---|
-  | 账户 | 全部账户资源 | Workers 脚本：**编辑** |
-  | 账户 | 全部账户资源 | Workers KV 存储：**读取** + **编辑** |
-  | 区域 | 域名所在区域 | Workers 路由：**编辑**（只有绑自定义域名时需要）|
-
-  > 不要用官方的「Edit Cloudflare Workers」模板 —— 它不含 KV 权限，自动创建命名空间会 403。
-  > Token 只在创建时显示一次，记得先复制。
-
-- **Account ID** — Cloudflare 控制台右侧栏，32 位十六进制。
+- **API Token** — <https://dash.cloudflare.com/profile/api-tokens> → Create Custom Token：
+  Workers 脚本**编辑** + Workers KV 存储**读取/编辑** +（绑域名时）Workers 路由**编辑**。
+  别用官方模板，它缺 KV 权限。
+- **Account ID** — 控制台右侧栏，32 位十六进制。
 
 **② 填进 GitHub**（Settings → Secrets and variables → Actions）
 
-| 类型 | Name | 值 |
+| 类型 | Name | 说明 |
 |---|---|---|
-| Secret | `CLOUDFLARE_API_TOKEN` | 上面的 Token |
-| Secret | `CLOUDFLARE_ACCOUNT_ID` | 上面的 Account ID |
-| Secret | `QUARK_STATE_JSON` | *可选*，现有夸克登录态，省去扫码（见下方「与 Node 版的差异」）|
-| Secret | `WEBDAV_USER` / `WEBDAV_PASS` | *可选*，建议改掉默认的 `admin/admin` |
-| Variable | `CF_CUSTOM_DOMAIN` | *可选*，如 `dav.example.com`，每次部署自动绑域名并签发证书 |
+| Secret | `CLOUDFLARE_API_TOKEN` | 上面的 Token（**必填**）|
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | 上面的 Account ID（**必填**）|
+| Variable | `CF_CUSTOM_DOMAIN` | 如 `dav.example.com`，自动绑域名并签发证书 |
+| Secret | `WEBDAV_USER` / `WEBDAV_PASS` | 建议改掉默认的 `admin/admin`（仓库是公开的）|
+| Secret | `QUARK_STATE_JSON` | 导入现有登录态，省一次扫码 |
 
-> `CF_CUSTOM_DOMAIN` 必须是 **Variable** 而不是 Secret：CI 每次都从仓库重新生成 `wrangler.toml`，
-> 只有存在变量里才不会被下一次部署抹掉。
+> `CF_CUSTOM_DOMAIN` 必须是 **Variable** 才能持久化 —— CI 每次重新生成 `wrangler.toml`，
+> 只填一次性 dispatch 输入会被下次部署抹掉。
 
-**③ 触发部署**
+**③ 触发**：Actions → **Deploy to Cloudflare Workers** → Run workflow，Job Summary 里给出访问地址。
 
-Actions 标签页 → **Deploy to Cloudflare Workers** → Run workflow。跑完 Job Summary 里会给出访问地址。
-此后推到 `main` 且改动涉及 `src/`、`wrangler.toml` 等会自动重新部署。
-
-### 本机用 wrangler CLI 部署
-
-需要一次浏览器 OAuth 授权：
+不想用 Actions 也可以本机跑（需要一次浏览器 OAuth）：
 
 ```bash
 npx wrangler login
-npx wrangler kv namespace create MYDAV_KV   # 把输出的 id 填进 wrangler.toml
-npm ci && npm run build:html
-npx wrangler deploy
+npx wrangler kv namespace create MYDAV_KV   # id 填进 wrangler.toml
+npm ci && npm run build:html && npx wrangler deploy
 ```
 
-### 与 Node 版的差异（重要）
+**两个版本不互通，注意这三条**
 
-- **两个部署的数据不互通**：CF 版读写独立的 Cloudflare KV，管理员密码要重设一次，夸克也要重新扫码
-  （或填 `QUARK_STATE_JSON` 导入）。
-- **管理员密码不能从 Node 版复制**：口令哈希是 PBKDF2，Node 版 120,000 轮而 CF 版为迁就 CPU 上限降到
-  20,000 轮，轮数不同则哈希不同，复制过去只会报「密码错误」。在 CF 版页面上重设一个即可。
-- **挂载密钥可以原样沿用**：它只是随机字符串，两边通用。在 CF 版管理台手动填入同一串，
-  播放器只换域名即可，不用重新挂载整个媒体库。
-- **取 `QUARK_STATE_JSON` 要从运行中的 Node 版「导出备份」取**，不要用本机 `data/token.json` ——
-  那是打包时的快照，access token 有效期只有 7 天左右，早过期了。
-- **CF 版固定 302 直连**：Workers Free 计划每请求只有 **10ms CPU** 和 **50 次子请求**，代理长视频会被
-  边缘掐断；PROPFIND 深遍历有子请求预算（默认 24 次）。
-- **自定义域名必须走橙色云 Proxied**，灰色 DNS 不触发 Worker，因此中国大陆的直连质量取决于运营商。
+- **管理员密码不能搬**：PBKDF2 轮数不同（Node 120k / CF 20k），哈希不一样，复制过去只会报密码错误 —— 在 CF 页上重设一个。
+- **挂载密钥可以沿用**：它只是随机字符串，填同一个串，播放器换域名即可，不用重新挂载媒体库。
+- **`QUARK_STATE_JSON` 要取自运行中的实例「导出备份」**，别用本机 `data/token.json`，那是过期快照。
 
+资源限制：Workers Free 每请求只有 10ms CPU、50 次子请求，所以 CF 版固定 302 且 PROPFIND 有子请求预算。
 完整说明见 [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md)。
 
 ## 项目结构
