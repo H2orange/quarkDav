@@ -4,9 +4,10 @@
 # public/login.html is compiled into src/consoleHtml.mjs so the bundle never
 # needs the filesystem.
 #
-# First-time setup (run locally, needs `npx wrangler login` once):
-#   npx wrangler kv namespace create MYDAV_KV
-# then paste the printed id into the [[kv_namespaces]] block below.
+# The KV id is intentionally left as a placeholder in git:
+#   * GitHub Actions fills it in at deploy time (scripts/cf-bootstrap.mjs
+#     resolves the namespace by title, creating it if it does not exist)
+#   * local deploy: npx wrangler kv namespace create MYDAV_KV, then paste the id
 
 name = "mydav"
 main = "src/worker.mjs"

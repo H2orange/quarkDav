@@ -29,7 +29,64 @@ src/
 因此 Cloudflare 版固定 **302 直连模式**：代理模式下一条播放请求要占用边缘连接几十分钟，
 容易被中断；302 让客户端自己去夸克 CDN 取流，服务端只付 API 调用。
 
-## 部署步骤
+## 部署方式 A：GitHub Actions（推荐）
+
+仓库已自带 `.github/workflows/deploy-cloudflare.yml`。**KV 命名空间由 workflow 自动创建
+（按标题 `MYDAV_KV` 查找，找不到就新建）**，所以你要做的只有填两个密钥。
+
+### 0. 准备两个密钥值
+
+**① Cloudflare API Token** —— https://dash.cloudflare.com/profile/api-tokens
+→ Create Custom Token，按下面勾选（用模板会漏权限）：
+
+| 范围 | 资源 | 权限 | 用途 |
+|---|---|---|---|
+| 账户 | 账户 API 令牌之外的全部账户资源 | Workers KV 存储：**读取** + **编辑** | workflow 查找/创建 KV 命名空间并灌入登录态 |
+| 账户 | 同上 | Workers 脚本：**编辑** | 上传 Worker |
+| 区域 | 你的域名所在区域（或全部区域） | Workers 路由：**编辑** | 只有要绑自定义域名时才需要 |
+
+Token 只在创建时显示一次，复制后立刻离开页面就找不回来了。
+
+**② Account ID** —— Cloudflare 控制台右侧栏直接显示，一串 32 位十六进制字符。
+
+### 1. 填进 GitHub
+
+Settings → Secrets and variables → Actions：
+
+| 类型 | Name | Secret / Value |
+|---|---|---|
+| Secret | `CLOUDFLARE_API_TOKEN` | 上面的 Token |
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | 上面的 Account ID |
+| Secret | `QUARK_STATE_JSON` | *可选*，见下方说明 |
+| Secret | `WEBDAV_USER` / `WEBDAV_PASS` | *可选*，见下方说明 |
+| Variable | `CF_CUSTOM_DOMAIN` | *可选*，例如 `dav.example.com` |
+
+三个可选项：
+
+- **`QUARK_STATE_JSON`** —— 不填也能用（部署后扫码登录）。填了可以省一次扫码：
+  把本机 `data/token.json` 的内容整段粘进去，或在 WorkBuddy 版页面上点「导出备份」取 JSON。
+- **`CF_CUSTOM_DOMAIN`** —— 填了之后**每次部署都会自动绑这个域名**（DNS 记录和证书由 Cloudflare
+  自动创建，不用手动操作）。必须存在仓库 **Variable** 里：每次 CI 都从仓库重新生成
+  `wrangler.toml`，只有变量里的域名才不会被下一次部署抹掉 —— 手动运行时填的入口只对那一次生效。
+- **`WEBDAV_USER` / `WEBDAV_PASS`** —— 不填的话会用 `wrangler.toml` 里的 `admin/admin` 默认值。
+  **仓库是公开的，强烈建议改掉。**
+
+### 2. 触发部署
+
+Actions 标签页 → Deploy to Cloudflare Workers → Run workflow。运行结束在 Job Summary 里会给出访问地址。
+
+之后**推到 `main` 且改动涉及 `src/`、`public/login.html`、`wrangler.toml` 等**会自动重新部署。
+
+### 3. 首次使用
+
+1. 打开 `https://你的域名/`，设置管理员密码（CF 版是独立的 KV，不继承 WorkBuddy 版的密码）。
+2. 扫码登录夸克；页面上的「导入备份」也能直接粘贴旧版的 JSON。
+3. 「一键复制挂载信息」，把地址填进播放器。
+
+> 与 WorkBuddy 版的区别：两者**数据不互通**——CF 版读写独立的 Cloudflare KV，
+> 需要各自设置管理员密码、各自扫码一次。
+
+## 部署方式 B：本机 wrangler CLI
 
 > 以下步骤在你本机执行：wrangler 需要一次浏览器 OAuth 授权，无法通过代理完成。
 
@@ -50,30 +107,30 @@ src/
 3. **部署**
 
    ```bash
-   npm install
+   npm ci
    npm run build:html     # 改动过 public/login.html 就要重跑
    npx wrangler deploy
    ```
 
-4. **绑定自定义域名**
+4. **手动写登录态（可选，省一次扫码）**
+
+   ```bash
+   npx wrangler kv key put --binding=MYDAV_KV state < data/token.json
+   ```
+
+   > 键名是 `state`，不是 `STATE`——`src/store.mjs` 里就是这么定义的。
+
+5. **绑定自定义域名**
    Cloudflare 控制台 → Workers & Pages → mydav → Settings → Domains & Routes → Add。
    DNS 记录由 Cloudflare 自动创建，证书也会自动签发。
 
    > 域名必须是**橙色云（Proxied）**。灰色 DNS Only 不会触发 Worker。
 
-## 首次使用
-
-1. 打开 `https://你的域名/`，设置管理员密码。
-2. 扫码登录夸克 → 「导入备份」按钮也可直接粘贴 WorkBuddy 版导出的 JSON，省一次扫码：
-
-   ```bash
-   # 在 CF 版页面用「导入备份」粘贴；或用命令行写入 KV
-   npx wrangler kv key put --binding=MYDAV_KV STATE < data/token.json
-   ```
-
-3. 「一键复制挂载信息」，把地址填进播放器。
-
 ## 改代码后
+
+用 Actions 部署的话不需要做任何事 —— 推到 `main` 会自动跑。
+
+本机方式：
 
 ```bash
 npm run build:html        # 只有改了 public/login.html 才需要

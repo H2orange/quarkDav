@@ -1,0 +1,139 @@
+name: Deploy to Cloudflare Workers
+
+# Deploys myDav to Cloudflare Workers. Requires two repository secrets:
+#   CLOUDFLARE_API_TOKEN   - API token with Workers Scripts / KV Storage permissions
+#   CLOUDFLARE_ACCOUNT_ID  - your Cloudflare account id
+#
+# Optional:
+#   Secret   QUARK_STATE_JSON  - existing Quark login state, skips the QR scan
+#   Secret   WEBDAV_USER/PASS  - overrides the weak admin/admin Basic-auth default
+#   Variable CF_CUSTOM_DOMAIN  - e.g. dav.example.com, attached on every deploy
+#
+# Full setup walkthrough: docs/CLOUDFLARE.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      custom_domain:
+        description: '临时自定义域名（一次性）。长期绑定请改用仓库变量 CF_CUSTOM_DOMAIN'
+        required: false
+        type: string
+      seed_state:
+        description: '把 QUARK_STATE_JSON 灌入 KV（省去扫码）'
+        required: false
+        type: boolean
+        default: true
+      force_seed_state:
+        description: '强制覆盖 KV 中已有的登录态'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'public/login.html'
+      - 'wrangler.toml'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-cloudflare.yml'
+
+concurrency:
+  group: deploy-cloudflare
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard — required secrets present?
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          missing=""
+          [ "$HAS_TOKEN"   = "true" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ "$HAS_ACCOUNT" = "true" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error title=缺少 GitHub Secrets::$missing"
+            echo "去 Settings -> Secrets and variables -> Actions -> New repository secret 添加。"
+            echo "取值方法见 docs/CLOUDFLARE.md 的「0. 准备两个密钥」一节。"
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile login page into the bundle
+        # The Worker cannot read files, so public/login.html is embedded as a JS
+        # string. Regenerate it here so editing the HTML alone is enough.
+        run: npm run build:html
+
+      - name: Resolve or create the KV namespace
+        id: kv
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_TITLE: ${{ vars.CF_KV_TITLE }}
+        run: |
+          id="$(node scripts/cf-bootstrap.mjs kv-id)"
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch wrangler.toml
+        env:
+          KV_ID: ${{ steps.kv.outputs.id }}
+          CUSTOM_DOMAIN: ${{ vars.CF_CUSTOM_DOMAIN || inputs.custom_domain }}
+          # Empty stays empty -> the (weak) admin/admin default in wrangler.toml
+          # keeps applying. Override those secrets before you rely on this.
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+        run: node scripts/cf-bootstrap.mjs patch
+
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+
+      - name: Seed Quark login state
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_ID: ${{ steps.kv.outputs.id }}
+          QUARK_STATE_JSON: ${{ inputs.seed_state == false && '' || secrets.QUARK_STATE_JSON }}
+          FORCE_SEED: ${{ inputs.force_seed_state == true && 'true' || 'false' }}
+        run: node scripts/cf-bootstrap.mjs put-state
+
+      - name: Print the URL
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          {
+            echo "## myDav 已部署"
+            echo ""
+            echo "- 访问地址：**$(node scripts/cf-bootstrap.mjs info)**"
+            if [ -n "${{ vars.CF_CUSTOM_DOMAIN || inputs.custom_domain }}" ]; then
+              echo "- 自定义域名：**https://${{ vars.CF_CUSTOM_DOMAIN || inputs.custom_domain }}/**"
+            fi
+            echo "- KV 命名空间 id：\`${{ steps.kv.outputs.id }}\`"
+            echo ""
+            echo "挂载地址在管理页登录后自动生成（形如 \`/dav/<随机密钥>\`）。"
+            echo "国内直连质量取决于运营商，建议保留 WorkBuddy 部署作为主力。"
+          } >> "$GITHUB_STEP_SUMMARY"
