@@ -204,7 +204,8 @@ async function cmdPutState() {
 
   await cf('PUT', `/storage/kv/namespaces/${kvId}/values/state`, {
     raw: JSON.stringify(parsed),
-    contentType: 'application/json',
+    // Cloudflare documents `application/octet-stream` for a raw-body write.
+    contentType: 'application/octet-stream',
   });
   log('已把夸克登录态写入 KV 键 state');
 }

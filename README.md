@@ -131,14 +131,27 @@ npx wrangler deploy
 
 ## 项目结构
 
+同一套业务逻辑配两个入口，Node 与 Workers **共用 `src/app.mjs`**，修 bug 只需改一处：
+
 ```
 src/
-  quarkTv.mjs    夸克 TV 端客户端：扫码登录、列目录、取播放直链（含签名算法）
-  webdav.mjs     只读 WebDAV 协议实现：OPTIONS / PROPFIND / GET / HEAD
-  server.mjs     HTTP 服务：管理台接口、鉴权、静态页、路由
+  app.mjs           业务核心（路由 / 鉴权 / WebDAV）—— 运行时无关，输入输出均为标准 Request/Response
+  quarkTv.mjs       夸克 TV 端客户端：扫码登录、列目录、取播放直链（含签名算法）
+  webdav.mjs        只读 WebDAV 协议实现：OPTIONS / PROPFIND / GET / HEAD
+  store.mjs         状态存储抽象：文件系统（Node）或 Workers KV
+  cryptoX.mjs       MD5 / SHA-256 / PBKDF2 / HMAC —— 只依赖 Web Crypto
+  consoleHtml.mjs   由 public/login.html 编译而来（npm run build:html）
+  server.mjs        Node 入口（薄壳，86 行）
+  worker.mjs        Cloudflare Workers 入口（薄壳，45 行）
+scripts/
+  cf-bootstrap.mjs  CI 辅助：解析/创建 KV 命名空间、回填 wrangler.toml、灌登录态
+  build-html.mjs    把 public/login.html 编译成 JS 字符串模块
 public/
-  login.html     管理台前端：管理员登录、扫码、文件浏览、挂载信息
+  login.html        管理台前端：管理员登录、扫码、文件浏览、挂载信息
 ```
+
+> **两个薄壳都不含业务逻辑**：`server.mjs` 只做 `IncomingMessage` ↔ `Request` 的转换，
+> `worker.mjs` 只做 `export default { fetch }` 的适配。因此 Node 版与 CF 版的行为始终一致。
 
 ## 运行时数据（不入库）
 

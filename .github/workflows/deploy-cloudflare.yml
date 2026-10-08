@@ -116,9 +116,20 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           KV_ID: ${{ steps.kv.outputs.id }}
-          QUARK_STATE_JSON: ${{ inputs.seed_state == false && '' || secrets.QUARK_STATE_JSON }}
+          # Passed through unconditionally: whether to actually use it is
+          # decided in the shell below. Doing it inline with
+          #   ${{ inputs.seed_state == false && '' || secrets.X }}
+          # silently un-skips, because an empty string is falsy and the `||`
+          # then falls through to the secret. Compare and unset instead.
+          QUARK_STATE_JSON: ${{ secrets.QUARK_STATE_JSON }}
+          SEED_STATE: ${{ inputs.seed_state == false && 'false' || 'true' }}
           FORCE_SEED: ${{ inputs.force_seed_state == true && 'true' || 'false' }}
-        run: node scripts/cf-bootstrap.mjs put-state
+        run: |
+          if [ "$SEED_STATE" = "false" ]; then
+            unset QUARK_STATE_JSON
+            echo "已按选项跳过登录态导入"
+          fi
+          node scripts/cf-bootstrap.mjs put-state
 
       - name: Print the URL
         env:
